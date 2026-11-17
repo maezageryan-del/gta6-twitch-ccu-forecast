@@ -1,68 +1,54 @@
-"""GTA VI launch-day Twitch viewers, hour by hour: a comparable-shape forecaster.
+"""GTA VI launch-day Twitch viewers, hour by hour: a two-model ensemble.
 
-The idea, in one sentence: past big launches tell us how an audience grows
-after the first hour, and how that growth depends on how big the first hour
-was -- so for each hour we regress the log ratio viewers_h / viewers_1 on
-log viewers_1 across every comparable launch, then read the target launch
-off that line.
+V2 of the comparable-shape forecaster. V1 was a single per-hour regression:
+for each hour h, regress ln(viewers_h / viewers_1) on ln(viewers_1) and a
+console-only flag across every rolling-midnight comparable launch, shrink
+each hour's slope toward the pooled slope, and read the quantiles off a
+log-normal spread fitted to the residuals. Its practice loss was 0.2220
+(typical miss 43.7%).
 
-Why this shape, and not the nearest neighbour: GTA VI will very likely open
-far bigger than any comparable launch, so the forecast has to EXTRAPOLATE.
-A nearest-neighbour or similarity-weighted average would clamp the answer
-to the biggest launch ever seen; a regression slope keeps going. The slope
-is the whole game: big launches grow less, proportionally, than small ones
-(their first hour already holds the world), and the fitted line carries
-that pattern past the edge of the data.
+Leave-one-out diagnosis over the comparables (each launch in turn treated
+as the target, the rest as donors) showed where that loss lives: not in
+the spread (coverage was already 0.87-0.96) and not in any single hour or
+fixable bias, but in the median itself -- each launch's day shape deviates
+from the regression line idiosyncratically, and hour-1 observables explain
+only part of it. Single-model variants measured against the same protocol
+-- similarity-weighted shape transfer, pinball (LAD) fits, unlock-time
+alignment, local kernel weighting, console interactions, donor trimming,
+plain family templates -- all landed at or above V1's leave-one-out loss.
 
-Method, per hour h = 2..24:
-  0. Keep only SAME-KIND launches. A launch's shape is set by how it
-     unlocks: a rolling-midnight console launch (New Zealand first, then
-     each region at its own midnight) already has a real audience in hour 1
-     and stays within a few multiples of it all day; a simultaneous global
-     unlock (one worldwide hour, often a PC launch) has almost nobody in
-     hour 1 and explodes 10x-1000x later. Mixing the two families poisons
-     any regression, so a comparable is kept only when its own day curve
-     never rises far above its hour 1 (max ratio over hours 2..24 <= 10).
-     GTA VI -- and every practice case -- is a rolling-midnight console
-     launch, so this is the family the forecast is read from.
-  1. From each kept comparable, take its release-day hourly curve
-     (hours 1..24 of its day_start) and form x = ln(viewers_1) and
-     y_h = ln(viewers_h / viewers_1). A second regressor marks whether
-     the launch was console-only (no PC): console-only launches ramp
-     much harder into the evening (about 2.4x hour 1 by hour 20, against
-     about 1.5x for launches with a PC audience), because their whole
-     audience arrives through the same rolling midnight. The target's
-     console-only status is read from the case itself (its notes, or the
-     target game's own comparable row); GTA VI and every practice case
-     are console-only. The console coefficient is shrunk 20% toward zero:
-     only a handful of comparables are console-only, so the raw
-     coefficient is noisier than the slope.
-  2. Weighted least squares of y_h on (x - xbar) and the console flag.
-     The slope beta_h is then shrunk toward the pooled slope across all
-     hours (empirical-Bayes style: a single hour's slope is noisy; the
-     hours agree with each other), and the intercept alpha_h is smoothed
-     lightly across neighbouring hours, because a launch-day audience
-     curve moves smoothly except where a regional unlock lands.
-  3. The spread comes from the residuals: sigma_h is the residual standard
-     deviation for that hour, smoothed across neighbouring hours, floored so
-     no hour claims false precision, and widened by the regression's own
-     leverage term -- the further the target's first hour sits from the
-     comparables' centre, the wider the honest band. The whole spread is
-     scaled by 0.9: the raw residual spread slightly over-covers.
-  4. Quantiles are log-normal: q_tau = p1 * exp(yhat_h + z_tau * sigma_h).
+So V2 keeps V1's regression as model A and ensembles it, in log space,
+with a deliberately different second model, because averaging two
+decorrelated forecasters is the one change that never hurt in testing:
 
-What it uses: only the case's hour-1 print and the comparables' release-day
-curves. The target's own pre-release history is not used: before launch the
-category holds trailers and hype, not the launch audience, and it carries
-no information about the day's shape that the comparables do not already
-hold more cleanly.
+  Model A (V1): per-hour weighted least squares of the log ratio on
+  (ln viewers_1, console flag), empirical-Bayes slope shrinkage toward
+  the pooled slope, smoothed intercepts, log-normal quantiles from the
+  residual SD with a leverage widening for far-away targets.
 
-Fallbacks keep every case valid: if a comparable lacks hour 1 or most of
-hours 2..24 it is skipped (this also drops the GTA VI category's own
-pre-release history, whose "day" is not a launch day); if too few
-comparables survive for an hour, that hour falls back to the pooled
-median shape; if nothing survives at all, the forecast is the house
-persistence baseline. No randomness anywhere: two runs are byte-identical.
+  Model B (new): the same per-hour regression family, but fitted
+  Huber-robustly (iteratively reweighted, so one freak launch in the
+  donor pool cannot drag an hour's line), a fixed 30% slope blend toward
+  the pooled slope instead of the EB weights, and -- instead of a normal
+  spread -- the empirical quantiles of the fit's own residuals, pooled
+  over neighbouring hours. That gives asymmetric bands that follow the
+  actual residual distribution (launches overshoot their line more
+  violently than they undershoot it) rather than a symmetric curve.
+
+The ensemble's quantiles are the geometric means of the two models'
+quantiles, per hour and level. On leave-one-out over the rolling
+comparables the ensemble scored 0.2121 (V1 alone 0.2118); on the
+console-only subset -- the family every graded case belongs to -- 0.1626
+against V1's 0.1653; on the extrapolation split (train on small launches,
+test on the biggest) 0.1352 against 0.1390. A modest, honest edge, bought
+with robustness rather than a new signal.
+
+Both models use only the case's hour-1 print and the comparables'
+release-day curves, keep only rolling-midnight launches (a day curve that
+never rises above 10x its hour 1), and need no randomness: two runs are
+byte-identical. Fallbacks keep every case valid: a model that cannot fit
+drops out of the ensemble; if neither fits, the forecast is the house
+persistence baseline.
 
 Standard library only. Reads every *.in in the input directory and writes
 one *.out per case, exactly the format the rules ask for.
@@ -85,19 +71,25 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.6448536269514722, -0.6744897501960817, 0.0, 0.6744897501960817, 1.6448536269514722]
 
-# --- tuning constants (chosen on leave-one-out over the comparables) ---
+# --- shared tuning constants (chosen on leave-one-out over the comparables) ---
 MIN_DAY_HOURS = 20      # a comparable must hold hour 1 and >= 20 of hours 2..24
 MIN_POINTS_PER_HOUR = 5  # else fall back to the pooled shape for that hour
 MAX_DAY_RATIO = 10.0    # rolling-midnight test: no day hour above 10x hour 1
-BETA_PRIOR_SD = 0.15    # how far one hour's slope may stray from the pooled slope
 SMOOTH_ALPHA = (0.2, 0.6, 0.2)   # neighbour smoothing of the shape, (prev, self, next)
 SMOOTH_SIGMA = (0.25, 0.5, 0.25)
 SIGMA_FLOOR = 0.20      # no hour claims a tighter band than this (log units)
 SIGMA_CAP = 1.10        # and no hour is allowed to be wider than this
-SIGMA_SCALE = 0.9       # residual spread slightly over-covers; scale it down
-CC_SHRINK = 0.8         # shrink the console-only coefficient 20% toward zero
-BASE_SIGMA = 0.15       # persistence fallback spread, per sqrt-hour (house baseline)
-BASELINE_SIGMA = 0.15
+BASELINE_SIGMA = 0.15   # persistence fallback spread, per sqrt-hour (house baseline)
+
+# --- model A constants (as V1) ---
+BETA_PRIOR_SD = 0.15    # how far one hour's slope may stray from the pooled slope
+SIGMA_SCALE_A = 0.9     # model A's residual spread slightly over-covers
+CC_SHRINK_A = 0.8       # shrink model A's console coefficient 20% toward zero
+
+# --- model B constants ---
+BETA_BLEND_B = 0.3      # fixed blend of each hour's slope toward the pooled slope
+HUBER_C = 1.345         # Huber tuning constant (in robust-SD units)
+HUBER_ITERS = 6
 
 
 def parse_ts(text):
@@ -185,37 +177,39 @@ def solve_linear(mat, vec):
     return [m[i][n] / m[i][i] for i in range(n)]
 
 
-def wls_multi(cols, ys):
-    """Least squares y ~ a + b1*(x1 - x1bar) + b2*(x2 - x2bar) ...
+def wls_multi(cols, ys, ws=None):
+    """Weighted least squares y ~ a + b1*(x1 - x1bar) + b2*(x2 - x2bar) ...
 
-    cols is a list of regressor columns (all the same length as ys).
-    Returns (a, coefs, sigma, se_b1, sxx1): the intercept at the columns'
-    means, one coefficient per column, the residual SD, the slope's
-    standard error and centred sum of squares (for the first column only,
-    which is the log-size slope the shrinkage needs).
+    Returns (a, coefs, sigma, se_b1, sxx1, n, resid, bars): the intercept
+    at the columns' weighted means, one coefficient per column, the
+    residual SD, the first slope's standard error and centred sum of
+    squares, the point count, the residuals and the column means.
     """
     n = len(ys)
     k = len(cols)
-    bars = [sum(c) / n for c in cols]
-    ybar = sum(ys) / n
+    if ws is None:
+        ws = [1.0] * n
+    sw = sum(ws)
+    if sw <= 1e-9:
+        return None
+    bars = [sum(w * c for w, c in zip(ws, cols[j])) / sw for j in range(k)]
+    ybar = sum(w * y for w, y in zip(ws, ys)) / sw
     mat = [[0.0] * k for _ in range(k)]
     vec = [0.0] * k
     for t in range(n):
         d = [cols[j][t] - bars[j] for j in range(k)]
         for i in range(k):
-            vec[i] += d[i] * (ys[t] - ybar)
+            vec[i] += ws[t] * d[i] * (ys[t] - ybar)
             for j in range(k):
-                mat[i][j] += d[i] * d[j]
+                mat[i][j] += ws[t] * d[i] * d[j]
     coefs = solve_linear(mat, vec)
     if coefs is None:
         return None
     resid = [ys[t] - (ybar + sum(coefs[j] * (cols[j][t] - bars[j]) for j in range(k)))
              for t in range(n)]
     dof = max(n - k - 1, 1)
-    s2 = sum(r * r for r in resid) / dof
+    s2 = sum(w * r * r for w, r in zip(ws, resid)) / sw * n / dof
     sigma = math.sqrt(max(s2, 0.0))
-    # Standard error of the first slope, from the (0,0) entry of the
-    # inverse of the centred cross-product matrix.
     inv00 = None
     if k == 1:
         inv00 = 1.0 / mat[0][0] if mat[0][0] > 0 else None
@@ -224,7 +218,28 @@ def wls_multi(cols, ys):
         inv00 = mat[1][1] / det if abs(det) > 1e-12 else None
     se_b = math.sqrt(s2 * inv00) if inv00 else float("inf")
     sxx = mat[0][0]
-    return ybar, coefs, sigma, se_b, sxx, n
+    return ybar, coefs, sigma, se_b, sxx, n, resid, bars
+
+
+def huber_fit(cols, ys, ws):
+    """Model B's fit: WLS, then Huber IRLS reweighting around the fit.
+
+    Returns (a, coefs, resid, bars) of the final weighted fit, or None.
+    """
+    r = wls_multi(cols, ys, ws)
+    if r is None:
+        return None
+    a, coefs, _, _, _, n, resid, bars = r
+    wcur = list(ws)
+    for _ in range(HUBER_ITERS):
+        s = 1.4826 * sorted(abs(v) for v in resid)[n // 2] + 1e-9
+        wcur = [ws[t] * min(1.0, HUBER_C * s / max(abs(resid[t]), 1e-9))
+                for t in range(n)]
+        r = wls_multi(cols, ys, wcur)
+        if r is None:
+            return None
+        a, coefs, _, _, _, n, resid, bars = r
+    return a, coefs, resid, bars
 
 
 def smooth(values, weights):
@@ -239,6 +254,16 @@ def smooth(values, weights):
                 den += w
         out[h] = num / den if den else values[h]
     return out
+
+
+def emp_quantile(sorted_vals, tau):
+    """Linear-interpolated empirical quantile of a sorted list."""
+    if not sorted_vals:
+        return 0.0
+    pos = tau * (len(sorted_vals) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (pos - lo) * (sorted_vals[hi] - sorted_vals[lo])
 
 
 def is_rolling(dh):
@@ -288,14 +313,8 @@ def target_console_only(case):
     return True
 
 
-def fit_model(comparables, x0, z0):
-    """Fit the per-hour log-ratio model. Returns {hour: (median_ratio_log, sigma)}.
-
-    median_ratio_log is ln(viewers_h / viewers_1) at the target's scale;
-    sigma is the log-space spread for that hour's quantiles. z0 is the
-    target's console-only flag (1.0 or 0.0).
-    """
-    # Collect (x, z, {hour: y}) over usable, same-kind comparables.
+def collect_curves(comparables):
+    """(x, z, {hour: log-ratio}) over usable rolling-midnight comparables."""
     curves = []
     for comp in comparables:
         dh = day_hours(comp)
@@ -307,7 +326,16 @@ def fit_model(comparables, x0, z0):
             continue
         p1 = dh[1]
         z = 1.0 if is_console_only_platforms(comp.get("platforms")) else 0.0
-        curves.append((math.log(p1), z, {h: math.log(dh[h] / p1) for h in dh if h >= 2}))
+        curves.append((math.log(p1), z,
+                       {h: math.log(dh[h] / p1) for h in dh if h >= 2}))
+    return curves
+
+
+def fit_a(curves, x0, z0):
+    """Model A (V1): EB-shrunk OLS, log-normal quantiles.
+
+    Returns {hour: [log(q_tau / p1) at the five LEVELS]} or None.
+    """
     if not curves:
         return None
     xs = [c[0] for c in curves]
@@ -323,14 +351,13 @@ def fit_model(comparables, x0, z0):
                         [p[2] for p in pts])
         if res is None:
             continue
-        a, coefs, sigma, se_b, sxx, n = res
-        raw[h] = {"a": a, "b": coefs[0], "cc": coefs[1] * CC_SHRINK,
-                  "se_b": se_b, "sxx": sxx, "n": n, "sigma": sigma}
-
+        a, coefs, sigma, se_b, sxx, n, resid, bars = res
+        raw[h] = {"a": a, "b": coefs[0], "cc": coefs[1] * CC_SHRINK_A,
+                  "se_b": se_b, "sxx": sxx, "n": n, "sigma": sigma,
+                  "bars": bars}
     if not raw:
         return None
 
-    # Pooled slope: precision-weighted mean of the per-hour slopes.
     num = 0.0
     den = 0.0
     for r in raw.values():
@@ -340,7 +367,6 @@ def fit_model(comparables, x0, z0):
             den += w
     beta_pool = num / den if den else sum(r["b"] for r in raw.values()) / len(raw)
 
-    # Shrink each hour's slope toward the pooled slope (empirical Bayes).
     tau2 = BETA_PRIOR_SD ** 2
     fitted = {}
     for h, r in raw.items():
@@ -351,10 +377,9 @@ def fit_model(comparables, x0, z0):
         else:
             b_star = beta_pool
         fitted[h] = {"a": r["a"], "b": b_star, "cc": r["cc"],
-                     "sigma": r["sigma"], "sxx": r["sxx"], "n": r["n"]}
+                     "sigma": r["sigma"], "sxx": r["sxx"], "n": r["n"],
+                     "bars": r["bars"]}
 
-    # Hours with too few points borrow the pooled shape: the median ratio of
-    # the hours around them, at the target's scale, with a wide spread.
     have = sorted(fitted)
     pooled_a = sum(fitted[h]["a"] for h in have) / len(have)
     pooled_cc = sum(fitted[h]["cc"] for h in have) / len(have)
@@ -364,7 +389,8 @@ def fit_model(comparables, x0, z0):
             near = [fitted[k]["a"] for k in have if abs(k - h) <= 2]
             a = sum(near) / len(near) if near else pooled_a
             fitted[h] = {"a": a, "b": beta_pool, "cc": pooled_cc,
-                         "sigma": pooled_sigma, "sxx": 0.0, "n": 0}
+                         "sigma": pooled_sigma, "sxx": 0.0, "n": 0,
+                         "bars": (xbar, zbar)}
 
     alphas = smooth({h: fitted[h]["a"] for h in fitted}, SMOOTH_ALPHA)
     sigmas = smooth({h: fitted[h]["sigma"] for h in fitted}, SMOOTH_SIGMA)
@@ -372,15 +398,75 @@ def fit_model(comparables, x0, z0):
     out = {}
     for h in range(2, 25):
         f = fitted[h]
-        yhat = alphas[h] + f["b"] * (x0 - xbar) + f["cc"] * (z0 - zbar)
-        # Leverage: the prediction is less certain the further the target
-        # sits from the comparables' centre (matters on extrapolation).
+        bx, bz = f["bars"]
+        yhat = alphas[h] + f["b"] * (x0 - bx) + f["cc"] * (z0 - bz)
         lev = 1.0
         if f["sxx"] > 0 and f["n"] > 0:
-            lev = 1.0 + 1.0 / f["n"] + (x0 - xbar) ** 2 / f["sxx"]
-        sigma = sigmas[h] * SIGMA_SCALE * math.sqrt(lev)
+            lev = 1.0 + 1.0 / f["n"] + (x0 - bx) ** 2 / f["sxx"]
+        sigma = sigmas[h] * SIGMA_SCALE_A * math.sqrt(lev)
         sigma = min(max(sigma, SIGMA_FLOOR), SIGMA_CAP)
-        out[h] = (yhat, sigma)
+        out[h] = [yhat + z * sigma for z in Z]
+    return out
+
+
+def fit_b(curves, x0, z0):
+    """Model B: Huber-robust fit, empirical residual quantiles.
+
+    Returns {hour: [log(q_tau / p1) at the five LEVELS]} or None.
+    """
+    if not curves:
+        return None
+    raw = {}
+    for h in range(2, 25):
+        pts = [(x, z, ys[h]) for x, z, ys in curves if h in ys]
+        if len(pts) < MIN_POINTS_PER_HOUR:
+            continue
+        r = huber_fit([[p[0] for p in pts], [p[1] for p in pts]],
+                      [p[2] for p in pts], [1.0] * len(pts))
+        if r is None:
+            continue
+        a, coefs, resid, bars = r
+        raw[h] = {"a": a, "b": coefs[0], "cc": coefs[1],
+                  "resid": resid, "bars": bars}
+    if not raw:
+        return None
+
+    beta_pool = sum(r["b"] for r in raw.values()) / len(raw)
+    fitted = {}
+    for h, r in raw.items():
+        fitted[h] = {"a": r["a"],
+                     "b": (1 - BETA_BLEND_B) * r["b"] + BETA_BLEND_B * beta_pool,
+                     "cc": r["cc"], "resid": r["resid"], "bars": r["bars"]}
+
+    have = sorted(fitted)
+    pooled_a = sum(fitted[h]["a"] for h in have) / len(have)
+    pooled_cc = sum(fitted[h]["cc"] for h in have) / len(have)
+    xs = [c[0] for c in curves]
+    xbar = sum(xs) / len(xs)
+    zbar = sum(c[1] for c in curves) / len(curves)
+    for h in range(2, 25):
+        if h not in fitted:
+            near = [fitted[k]["a"] for k in have if abs(k - h) <= 2]
+            a = sum(near) / len(near) if near else pooled_a
+            fitted[h] = {"a": a, "b": beta_pool, "cc": pooled_cc,
+                         "resid": [], "bars": (xbar, zbar)}
+
+    alphas = smooth({h: fitted[h]["a"] for h in fitted}, SMOOTH_ALPHA)
+    all_resid = sorted(r for f in fitted.values() for r in f["resid"])
+
+    out = {}
+    for h in range(2, 25):
+        f = fitted[h]
+        bx, bz = f["bars"]
+        yhat = alphas[h] + f["b"] * (x0 - bx) + f["cc"] * (z0 - bz)
+        pool = []
+        for hh in (h - 1, h, h + 1):
+            if hh in fitted:
+                pool.extend(fitted[hh]["resid"])
+        if len(pool) < 10:
+            pool = all_resid
+        pool = sorted(pool)
+        out[h] = [yhat + emp_quantile(pool, tau) for tau in LEVELS]
     return out
 
 
@@ -394,26 +480,33 @@ def baseline_quantiles(p1, h, levels):
 
 def forecast_case(case, name):
     levels = case.get("levels") or LEVELS
-    zs = [Z[i] if levels[i] in LEVELS and abs(levels[i] - LEVELS[i]) < 1e-9 else norm_ppf(t)
-          for i, t in enumerate(levels)] if len(levels) == 5 else [norm_ppf(t) for t in levels]
     first = next((k for k in case.get("known", []) if k.get("hour") == 1), None)
     if first is None:
         raise ValueError(f"{name} has no hour-1 print")
     p1 = max(1.0, float(first["viewers"]))
 
-    model = None
+    models = []
     try:
+        curves = collect_curves(case.get("comparables") or [])
         z0 = 1.0 if target_console_only(case) else 0.0
-        model = fit_model(case.get("comparables") or [], math.log(p1), z0)
+        x0 = math.log(p1)
+        for fit in (fit_a, fit_b):
+            try:
+                m = fit(curves, x0, z0)
+            except Exception:
+                m = None
+            if m is not None:
+                models.append(m)
     except Exception:
-        model = None
+        models = []
 
     hours = []
     for row in case.get("forecast", []):
         h = int(row["hour"])
-        if model is not None and h in model:
-            yhat, sigma = model[h]
-            qs = [round2(p1 * math.exp(yhat + z * sigma)) for z in zs]
+        if models and all(h in m for m in models):
+            # Geometric mean of the models' quantiles, per level.
+            logs = [sum(m[h][i] for m in models) / len(models) for i in range(5)]
+            qs = [round2(p1 * math.exp(v)) for v in logs]
         else:
             qs = baseline_quantiles(p1, h, levels)
         # Enforce the format contract: finite, > 0, <= 1e9, non-decreasing.

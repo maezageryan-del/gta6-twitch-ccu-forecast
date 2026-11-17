@@ -2,63 +2,63 @@
 [![rank](https://make.fun/badge/gta6-twitch-ccu-forecast-01/maezageryan-del/gta6-twitch-ccu-forecast/rank.svg)](https://make.fun/bounty/gta6-twitch-ccu-forecast-01)
 [![reward](https://make.fun/badge/gta6-twitch-ccu-forecast-01/maezageryan-del/gta6-twitch-ccu-forecast/reward.svg)](https://make.fun/bounty/gta6-twitch-ccu-forecast-01)
 
-# GTA VI Launch-Day Twitch Viewers — Comparable-Shape Forecaster
+# GTA VI Launch-Day Twitch Viewers — Two-Model Ensemble Forecaster
 
 Forecasts how many people watch Grand Theft Auto VI live on Twitch in each
 hour of its release day (2026-11-19 UTC), hour by hour, from everything
 recorded up to the end of the day's first hour — as five quantiles per hour
 — for make.fun's `gta6-twitch-ccu-forecast-01` ($250, top 20 paid).
 
-## The model
+V2 of the comparable-shape forecaster (V1 scored 0.2220 on the practice
+board). A leave-one-out diagnosis of V1 showed its loss lives in the
+median, not the spread: each launch's day shape deviates from any single
+regression line idiosyncratically. V2 therefore ensembles two deliberately
+different models and averages their quantiles in log space — the one
+change that never hurt in testing.
 
-One idea, carried all the way through: **past big launches tell us how an
-audience grows after the first hour, and how that growth depends on how big
-the first hour was.** For each hour `h = 2..24`, the program regresses the
-log ratio `ln(viewers_h / viewers_1)` on `ln(viewers_1)` across the
-comparable launches in the case, then reads the target launch off that line.
+## The models
 
-Three things make it work where a nearest-neighbour or a flat median fails:
+Shared idea: **past big launches tell us how an audience grows after the
+first hour, and how that growth depends on how big the first hour was.**
+For each hour `h = 2..24`, both models regress the log ratio
+`ln(viewers_h / viewers_1)` on `ln(viewers_1)` and a console-only flag
+across the comparable launches in the case, then read the target launch
+off that line. Both keep **same-kind launches only**: a comparable counts
+only when its own day curve never rises far above its hour 1 (max ratio
+≤ 10x), the rolling-midnight console family — a simultaneous global
+unlock has almost nobody in hour 1 and explodes later, and mixing the two
+families poisons any regression. Both extrapolate: a regression slope
+keeps going past the biggest launch ever seen, where a nearest neighbour
+would clamp.
 
-1. **Same-kind launches only.** A launch's shape is set by how it unlocks.
-   A rolling-midnight console launch already has a real audience in hour 1
-   and stays within a few multiples of it all day; a simultaneous global
-   unlock (often a PC launch) has almost nobody in hour 1 and explodes
-   10x–1000x later. Mixing the two families poisons any regression, so a
-   comparable is kept only when its own day curve never rises far above its
-   hour 1 (max ratio ≤ 10x). This also drops the GTA VI category's own
-   pre-release history, whose "day" is not a launch day.
-2. **A console-only effect.** Console-only launches ramp much harder into
-   the evening (about 2.4x hour 1 by hour 20, against about 1.5x for
-   launches with a PC audience). The regression carries a console-only
-   indicator, read from the case itself (its notes, or the target game's
-   own comparable row), shrunk 20% toward zero because only a handful of
-   comparables are console-only.
-3. **It extrapolates.** GTA VI will very likely open far bigger than any
-   comparable, so the forecast has to keep going past the edge of the data.
-   A regression slope does that; a nearest neighbour would clamp the answer
-   to the biggest launch ever seen. The slope is shrunk toward the pooled
-   slope across hours, the shape is smoothed lightly across neighbouring
-   hours, and the spread is the residual standard deviation, widened by
-   the regression's own leverage term — so the further the target sits
-   from the comparables' centre, the wider the honest band.
+- **Model A** (V1's model): weighted least squares, each hour's slope
+  shrunk toward the pooled slope with empirical-Bayes weights, the
+  console coefficient shrunk 20%, log-normal quantiles from the residual
+  SD, widened by the regression's leverage term.
+- **Model B** (new): the same regression fitted **Huber-robustly**, so one
+  freak launch in the donor pool cannot drag an hour's line; a fixed 30%
+  slope blend toward the pooled slope; and **empirical residual
+  quantiles**, pooled over neighbouring hours, instead of a normal
+  spread — asymmetric bands that follow how launches actually miss their
+  line (they overshoot more violently than they undershoot).
 
-Quantiles are log-normal: `q_tau = p1 * exp(yhat_h + z_tau * sigma_h)`.
-Standard library only, deterministic, ~0.07 s per case.
+Standard library only, deterministic, ~0.08 s per case.
 
 ## Validation (leave-one-out over the comparables)
 
-The kit ships no practice answers (the scorer is server-side), so the model
-was validated by treating each comparable launch as a pseudo-case: its
-hour-1 print is the only input, its real hours 2–24 are the answer.
+The kit ships no practice answers (the scorer is server-side), so the
+models were validated by treating each comparable launch as a pseudo-case:
+its hour-1 print is the only input, its real hours 2–24 are the answer.
 
-| Test | Pinball loss | Typical miss | 90% coverage |
-| --- | --- | --- | --- |
-| Console-only targets (n=8, the family GTA VI belongs to) | **0.165** | 31% | 0.95 |
-| All rolling-midnight targets (n=27) | 0.212 | 42% | 0.87 |
-| Extrapolation: fit on hour-1 < 200k, test on the 6 biggest launches | **0.139** | 22% | 1.00 |
+| Test | V1 loss | V2 loss | Typical miss | 90% coverage |
+| --- | --- | --- | --- | --- |
+| Console-only targets (n=8, the family GTA VI belongs to) | 0.165 | **0.163** | 31% | 0.97 |
+| All rolling-midnight targets (n=27) | 0.212 | 0.212 | 42% | 0.86 |
+| Extrapolation: fit on hour-1 < 200k, test on the 6 biggest | 0.139 | **0.135** | 22% | 1.00 |
 
-For reference: the house baseline scores ~0.387 on the practice cases, the
-practice leaderboard's #1 sits at 0.169, and the top-20 cutoff is 0.240.
+For reference: the house baseline scores ~0.387 on the practice cases;
+the practice leaderboard's top entries sit at ≈0.122–0.136 and the
+top-20 cutoff at ≈0.15.
 
 ## Run it
 
